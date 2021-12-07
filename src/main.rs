@@ -15,14 +15,14 @@ fn main() {
         .get_matches();
     env_logger::init();
 
-    let mountpoint = matches.value_of("MOUNT_POINT").unwrap();
+    let _mountpoint = matches.value_of("MOUNT_POINT").unwrap();
     // TODO: In the future, switch to RW filesystem, choose sync or async i/o, allow execution of
     // binaries
-    let options = vec![
+    let _options = vec![
         MountOption::RO,
         MountOption::FSName("tag_fs".to_string()),
         MountOption::AutoUnmount,
         MountOption::AllowOther,
     ];
-    fuser::mount2(fs::TagFS, mountpoint, &options).unwrap();
+    //fuser::mount2(fs::TagFS, mountpoint, &options).unwrap();
 }

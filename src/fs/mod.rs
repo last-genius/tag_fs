@@ -9,6 +9,8 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod nodes;
+
 const TTL: Duration = Duration::from_secs(1);
 
 const HELLO_TXT_CONTENT: &str = "Hello World!\n";
@@ -51,7 +53,9 @@ static ref HELLO_TXT_ATTR: FileAttr = FileAttr {
 };
 }
 
-pub struct TagFS;
+pub struct TagFS {
+    //file_inodes: Vec<FileAttr>,
+}
 
 // TODO: Transition to an actual filesystem, either a simple non-tag one or just start implementing
 // the tag filesystem functionality
@@ -68,6 +72,7 @@ impl Filesystem for TagFS {
         } else {
             reply.error(ENOENT);
         }
+        nodes::HashNode::new();
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
@@ -130,8 +135,16 @@ impl Filesystem for TagFS {
     // NOTE: All the calls below this point are unimplemented, and return their default return
     // values, while also debug printing some information so we could use that while developing and
     // determining which functions need to be implemented for certain functionality to work
+    //
+    // TODO: Figure out what exactly is needed for simple functionality
+    //  * file creation
+    //  * file attributes changing
+    //  * "directory" creation
+    //  * moving files and tags
 
     fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
+        // TODO: Initiate hashers, lists, etc.
+        // TODO: In future, recover data from a disk image?
         debug!("init");
         Ok(())
     }
