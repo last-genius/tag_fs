@@ -5,9 +5,13 @@ use fuser::{
 };
 use libc::{c_int, getgid, getuid, ENOENT, ENOSYS};
 use log::debug;
-use std::ffi::OsStr;
+use sha3::{Digest, Sha3_256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use self::nodes::{FileNode, NameNode, Node, TagNode};
 
 mod nodes;
 
@@ -15,46 +19,93 @@ const TTL: Duration = Duration::from_secs(1);
 
 const HELLO_TXT_CONTENT: &str = "Hello World!\n";
 
-lazy_static::lazy_static! {
-static ref HELLO_DIR_ATTR: FileAttr = FileAttr {
-    ino: 1,
-    size: 0,
-    blocks: 0,
-    atime: UNIX_EPOCH, // 1970-01-01 00:00:00
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-    kind: FileType::Directory,
-    perm: 0o755,
-    nlink: 2,
-    uid: unsafe { getuid() },
-    gid: unsafe { getgid() },
-    rdev: 0,
-    flags: 0,
-    blksize: 512,
-};
+trait NewFileAttr {
+    fn new_file_attr(ino: u64, kind: FileType, perm: u16) -> FileAttr;
+}
 
-static ref HELLO_TXT_ATTR: FileAttr = FileAttr {
-    ino: 2,
-    size: 13,
-    blocks: 1,
-    atime: UNIX_EPOCH, // 1970-01-01 00:00:00
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-    kind: FileType::RegularFile,
-    perm: 0o644,
-    nlink: 1,
-    uid: unsafe { getuid() },
-    gid: unsafe { getgid() },
-    rdev: 0,
-    flags: 0,
-    blksize: 512,
-};
+impl NewFileAttr for FileAttr {
+    fn new_file_attr(ino: u64, kind: FileType, perm: u16) -> FileAttr {
+        FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
+            kind,
+            perm,
+            nlink: 2,
+            uid: unsafe { getuid() },
+            gid: unsafe { getgid() },
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref FAKE_ROOT_DIR_ATTR: FileAttr = FileAttr::new_file_attr(1, FileType::Directory, 0x755);
+
+    static ref HELLO_TXT_ATTR: FileAttr = FileAttr {
+        ino: 2,
+        size: 13,
+        blocks: 1,
+        atime: UNIX_EPOCH, // 1970-01-01 00:00:00
+        mtime: UNIX_EPOCH,
+        ctime: UNIX_EPOCH,
+        crtime: UNIX_EPOCH,
+        kind: FileType::RegularFile,
+        perm: 0o644,
+        nlink: 1,
+        uid: unsafe { getuid() },
+        gid: unsafe { getgid() },
+        rdev: 0,
+        flags: 0,
+        blksize: 512,
+    };
 }
 
 pub struct TagFS {
-    //file_inodes: Vec<FileAttr>,
+    hasher: Sha3_256,
+    name_nodes: BTreeMap<OsString, BTreeSet<NameNode>>,
+    file_nodes: BTreeSet<Node>,
+}
+
+impl TagFS {
+    pub fn new() -> Self {
+        let mut fs = Self {
+            hasher: Sha3_256::new(),
+            name_nodes: BTreeMap::<OsString, BTreeSet<NameNode>>::new(),
+            file_nodes: BTreeSet::<Node>::new(),
+        };
+
+        // Create a fake root dir (sort of like 'all tags')
+        let fake_root = TagNode::new(&mut fs.hasher, 1);
+        fs.file_nodes.insert(Node::Tag(fake_root));
+
+        // Create a simple test file too
+        let file_node = FileNode::new(&mut fs.hasher, 2);
+        fs.file_nodes.insert(Node::File(file_node.clone()));
+
+        debug!("{:?}", file_node.borrow().hash);
+
+        let name_node = NameNode::new("file1".into(), Node::File(file_node));
+
+        fs.insert_name_node(name_node);
+
+        fs
+    }
+
+    // TODO: Figure out proper references. But for now we can just clone this shit
+    pub fn insert_name_node(&mut self, name_node: NameNode) {
+        let name = name_node.name.clone();
+        self.name_nodes
+            .entry(name)
+            .or_insert(BTreeSet::new())
+            .insert(name_node);
+    }
 }
 
 // TODO: Transition to an actual filesystem, either a simple non-tag one or just start implementing
@@ -67,21 +118,34 @@ impl Filesystem for TagFS {
             parent,
             name.to_str().unwrap()
         );
-        if parent == 1 && name.to_str() == Some("hello.txt") {
-            reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
+        let os_name = &name.to_os_string();
+        if self.name_nodes.contains_key(os_name) {
+            let entry = self.name_nodes[os_name].first();
+            if let Some(x) = entry {
+                match &x.link {
+                    Node::File(y) => reply.entry(&TTL, &y.borrow().file_attr, 0),
+                    Node::Tag(y) => reply.entry(&TTL, &y.borrow().dir_attr, 0),
+                }
+            }
         } else {
             reply.error(ENOENT);
         }
-        nodes::HashNode::new();
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         debug!("getattr | ino: {}", ino);
-        match ino {
-            1 => reply.attr(&TTL, &HELLO_DIR_ATTR),
-            2 => reply.attr(&TTL, &HELLO_TXT_ATTR),
-            _ => reply.error(ENOENT),
+        // TODO: maintain a separate storage for quick inode search????
+        for file in &self.file_nodes {
+            let file_attr = match file {
+                Node::File(x) => x.borrow().file_attr,
+                Node::Tag(x) => x.borrow().dir_attr,
+            };
+            if file_attr.ino == ino {
+                reply.attr(&TTL, &file_attr);
+                return;
+            }
         }
+        reply.error(ENOENT);
     }
 
     fn read(
@@ -112,24 +176,35 @@ impl Filesystem for TagFS {
         mut reply: ReplyDirectory,
     ) {
         debug!("readdir | ino: {}; offset: {}", ino, offset);
-        if ino != 1 {
+
+        if ino == 1 {
+            // It is actually much easier to first implement weak back-references
+            // TODO
+            //for (i, (name, entry)) in self.name_nodes.iter().enumerate().skip(offset as usize) {
+            //// i + 1 means the index of the next entry
+            //match entry {
+            //Node::File(x) => {
+            //let file_attr = x.borrow().file_attr;
+            //if reply.add(
+            //file_attr.ino,
+            //(i + 1) as i64,
+            //FileType::RegularFile,
+            //entry.2,
+            //) {
+            //break;
+            //}
+            //}
+            //Node::Tag(x) => {
+            //if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
+            //break;
+            //}
+            //}
+            //}
+            //}
+            reply.ok();
+        } else {
             reply.error(ENOENT);
-            return;
         }
-
-        let entries = vec![
-            (1, FileType::Directory, "."),
-            (1, FileType::Directory, ".."),
-            (2, FileType::RegularFile, "hello.txt"),
-        ];
-
-        for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-            // i + 1 means the index of the next entry
-            if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
-                break;
-            }
-        }
-        reply.ok();
     }
 
     // NOTE: All the calls below this point are unimplemented, and return their default return

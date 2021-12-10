@@ -1,3 +1,4 @@
+#![feature(map_first_last)]
 use clap::{crate_version, App, Arg};
 use fuser::MountOption;
 
@@ -15,14 +16,15 @@ fn main() {
         .get_matches();
     env_logger::init();
 
-    let _mountpoint = matches.value_of("MOUNT_POINT").unwrap();
+    let mountpoint = matches.value_of("MOUNT_POINT").unwrap();
     // TODO: In the future, switch to RW filesystem, choose sync or async i/o, allow execution of
     // binaries
-    let _options = vec![
-        MountOption::RO,
+    let options = vec![
+        MountOption::RW,
         MountOption::FSName("tag_fs".to_string()),
         MountOption::AutoUnmount,
         MountOption::AllowOther,
     ];
-    //fuser::mount2(fs::TagFS, mountpoint, &options).unwrap();
+    let fs = fs::TagFS::new();
+    fuser::mount2(fs, mountpoint, &options).unwrap();
 }
