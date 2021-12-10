@@ -1,26 +1,39 @@
-use std::{cell::RefCell, cmp::Ordering, ffi::OsString, rc::Rc};
+use std::{
+    cell::RefCell,
+    cmp::Ordering,
+    collections::BTreeSet,
+    ffi::OsString,
+    rc::{Rc, Weak},
+};
 
 use fuser::{FileAttr, FileType};
 use sha3::{
     digest::{generic_array::GenericArray, FixedOutput},
     Digest, Sha3_256,
 };
+use uuid::Uuid;
 
 use super::NewFileAttr;
 
 pub type Hash256 = GenericArray<u8, <Sha3_256 as FixedOutput>::OutputSize>;
 
-#[derive(PartialEq, Eq)]
 pub struct FileNode {
     // TODO
     //content:
     //metadata schema
     //block references
     //hash per block
-    pub file_attr: FileAttr,
     pub hash: Hash256,
+    pub file_attr: FileAttr,
+    pub back_links: Vec<Weak<RefCell<NameNode>>>,
 }
 
+impl PartialEq for FileNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+    }
+}
+impl Eq for FileNode {}
 impl Ord for FileNode {
     fn cmp(&self, other: &Self) -> Ordering {
         self.hash.cmp(&other.hash)
@@ -35,8 +48,9 @@ impl PartialOrd for FileNode {
 impl FileNode {
     pub fn new(hasher: &mut Sha3_256, ino: u64) -> Rc<RefCell<FileNode>> {
         let f = Self {
-            file_attr: FileAttr::new_file_attr(ino, FileType::RegularFile, 0o644),
             hash: hasher.finalize_reset(),
+            file_attr: FileAttr::new_file_attr(ino, FileType::RegularFile, 0o644),
+            back_links: Vec::new(),
         };
 
         Rc::new(RefCell::new(f))
@@ -51,17 +65,23 @@ impl FileNode {
     }
 }
 
-#[derive(PartialEq, Eq)]
 pub struct TagNode {
-    // TODO: tag core etc
     // TODO: links to files
+    pub id: Uuid,
     pub dir_attr: FileAttr,
-    pub hash: Hash256,
+    pub back_links: Vec<Weak<RefCell<NameNode>>>,
+    pub dir_links: BTreeSet<Rc<RefCell<NameNode>>>,
 }
 
+impl PartialEq for TagNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for TagNode {}
 impl Ord for TagNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.hash.cmp(&other.hash)
+        self.id.cmp(&other.id)
     }
 }
 impl PartialOrd for TagNode {
@@ -71,17 +91,23 @@ impl PartialOrd for TagNode {
 }
 
 impl TagNode {
-    pub fn new(hasher: &mut Sha3_256, ino: u64) -> Rc<RefCell<TagNode>> {
+    pub fn new(ino: u64) -> Rc<RefCell<TagNode>> {
         let f = Self {
+            id: Uuid::new_v4(),
             dir_attr: FileAttr::new_file_attr(ino, FileType::Directory, 0o644),
-            hash: hasher.finalize_reset(),
+            back_links: Vec::new(),
+            dir_links: BTreeSet::new(),
         };
 
         Rc::new(RefCell::new(f))
     }
+
+    pub fn add_file(&mut self, name_node: Rc<RefCell<NameNode>>) {
+        self.dir_links.insert(name_node);
+    }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum Node {
     File(Rc<RefCell<FileNode>>),
     Tag(Rc<RefCell<TagNode>>),
@@ -110,8 +136,17 @@ impl PartialEq for NameNode {
 impl Eq for NameNode {}
 
 impl NameNode {
-    pub fn new(name: OsString, link: Node) -> Self {
-        Self { name, link }
+    pub fn new(name: OsString, link: Node) -> Rc<RefCell<Self>> {
+        let name_node = Rc::new(RefCell::new(Self {
+            name,
+            link: link.clone(),
+        }));
+        match link {
+            Node::File(x) => x.borrow_mut().back_links.push(Rc::downgrade(&name_node)),
+            Node::Tag(x) => x.borrow_mut().back_links.push(Rc::downgrade(&name_node)),
+        };
+
+        name_node
     }
 }
 
@@ -119,7 +154,3 @@ impl NameNode {
 // structures. Git-like blo[b|ck] operation???
 
 // TODO: Figure out metadata schema stuff
-
-// TODO: FileNameNode
-// TODO: TagNode
-// TODO: TagNameNode

@@ -6,9 +6,11 @@ use fuser::{
 use libc::{c_int, getgid, getuid, ENOENT, ENOSYS};
 use log::debug;
 use sha3::{Digest, Sha3_256};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use self::nodes::{FileNode, NameNode, Node, TagNode};
@@ -69,7 +71,7 @@ lazy_static::lazy_static! {
 
 pub struct TagFS {
     hasher: Sha3_256,
-    name_nodes: BTreeMap<OsString, BTreeSet<NameNode>>,
+    name_nodes: BTreeMap<OsString, BTreeSet<Rc<RefCell<NameNode>>>>,
     file_nodes: BTreeSet<Node>,
 }
 
@@ -77,21 +79,20 @@ impl TagFS {
     pub fn new() -> Self {
         let mut fs = Self {
             hasher: Sha3_256::new(),
-            name_nodes: BTreeMap::<OsString, BTreeSet<NameNode>>::new(),
-            file_nodes: BTreeSet::<Node>::new(),
+            name_nodes: BTreeMap::new(),
+            file_nodes: BTreeSet::new(),
         };
 
         // Create a fake root dir (sort of like 'all tags')
-        let fake_root = TagNode::new(&mut fs.hasher, 1);
-        fs.file_nodes.insert(Node::Tag(fake_root));
+        let fake_root = TagNode::new(1);
+        fs.file_nodes.insert(Node::Tag(fake_root.clone()));
 
         // Create a simple test file too
-        let file_node = FileNode::new(&mut fs.hasher, 2);
+        let file_node: Rc<RefCell<FileNode>> = FileNode::new(&mut fs.hasher, 2);
         fs.file_nodes.insert(Node::File(file_node.clone()));
 
-        debug!("{:?}", file_node.borrow().hash);
-
         let name_node = NameNode::new("file1".into(), Node::File(file_node));
+        fake_root.borrow_mut().add_file(name_node.clone());
 
         fs.insert_name_node(name_node);
 
@@ -99,17 +100,14 @@ impl TagFS {
     }
 
     // TODO: Figure out proper references. But for now we can just clone this shit
-    pub fn insert_name_node(&mut self, name_node: NameNode) {
-        let name = name_node.name.clone();
+    pub fn insert_name_node(&mut self, name_node: Rc<RefCell<NameNode>>) {
+        let name = RefCell::borrow(&name_node).name.clone();
         self.name_nodes
             .entry(name)
             .or_insert(BTreeSet::new())
             .insert(name_node);
     }
 }
-
-// TODO: Transition to an actual filesystem, either a simple non-tag one or just start implementing
-// the tag filesystem functionality
 
 impl Filesystem for TagFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
@@ -122,9 +120,9 @@ impl Filesystem for TagFS {
         if self.name_nodes.contains_key(os_name) {
             let entry = self.name_nodes[os_name].first();
             if let Some(x) = entry {
-                match &x.link {
-                    Node::File(y) => reply.entry(&TTL, &y.borrow().file_attr, 0),
-                    Node::Tag(y) => reply.entry(&TTL, &y.borrow().dir_attr, 0),
+                match &RefCell::borrow(&x).link {
+                    Node::File(y) => reply.entry(&TTL, &RefCell::borrow(&y).file_attr, 0),
+                    Node::Tag(y) => reply.entry(&TTL, &RefCell::borrow(&y).dir_attr, 0),
                 }
             }
         } else {
@@ -137,8 +135,8 @@ impl Filesystem for TagFS {
         // TODO: maintain a separate storage for quick inode search????
         for file in &self.file_nodes {
             let file_attr = match file {
-                Node::File(x) => x.borrow().file_attr,
-                Node::Tag(x) => x.borrow().dir_attr,
+                Node::File(x) => RefCell::borrow(&x).file_attr,
+                Node::Tag(x) => RefCell::borrow(&x).dir_attr,
             };
             if file_attr.ino == ino {
                 reply.attr(&TTL, &file_attr);
@@ -177,34 +175,61 @@ impl Filesystem for TagFS {
     ) {
         debug!("readdir | ino: {}; offset: {}", ino, offset);
 
-        if ino == 1 {
-            // It is actually much easier to first implement weak back-references
-            // TODO
-            //for (i, (name, entry)) in self.name_nodes.iter().enumerate().skip(offset as usize) {
-            //// i + 1 means the index of the next entry
-            //match entry {
-            //Node::File(x) => {
-            //let file_attr = x.borrow().file_attr;
-            //if reply.add(
-            //file_attr.ino,
-            //(i + 1) as i64,
-            //FileType::RegularFile,
-            //entry.2,
-            //) {
-            //break;
-            //}
-            //}
-            //Node::Tag(x) => {
-            //if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
-            //break;
-            //}
-            //}
-            //}
-            //}
-            reply.ok();
-        } else {
-            reply.error(ENOENT);
+        for node in &self.file_nodes {
+            match node {
+                Node::File(x) => {
+                    let file = RefCell::borrow(&x);
+                    if file.file_attr.ino == ino {
+                        // TODO
+                        for (i, entry) in file.back_links.iter().enumerate().skip(offset as usize) {
+                            let e = entry.upgrade().unwrap();
+                            let x = RefCell::borrow(&e);
+                            // i + 1 means the index of the next entry
+                            // i-node, offset, type, name
+                            if reply.add(ino, (i + 1) as i64, FileType::RegularFile, &x.name) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Node::Tag(x) => {
+                    let tag = RefCell::borrow(&x);
+                    if tag.dir_attr.ino == ino {
+                        // TODO
+                        for (i, entry) in tag.dir_links.iter().enumerate().skip(offset as usize) {
+                            let x = RefCell::borrow(entry);
+                            // i + 1 means the index of the next entry
+                            // i-node, offset, type, name
+                            match &x.link {
+                                Node::Tag(y) => {
+                                    if reply.add(
+                                        RefCell::borrow(&y).dir_attr.ino,
+                                        (i + 1) as i64,
+                                        FileType::Directory,
+                                        &x.name,
+                                    ) {
+                                        break;
+                                    }
+                                }
+                                Node::File(y) => {
+                                    if reply.add(
+                                        RefCell::borrow(&y).file_attr.ino,
+                                        (i + 1) as i64,
+                                        FileType::RegularFile,
+                                        &x.name,
+                                    ) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    reply.ok();
+                    return;
+                }
+            };
         }
+        reply.error(ENOENT);
     }
 
     // NOTE: All the calls below this point are unimplemented, and return their default return
@@ -212,7 +237,8 @@ impl Filesystem for TagFS {
     // determining which functions need to be implemented for certain functionality to work
     //
     // TODO: Figure out what exactly is needed for simple functionality
-    //  * file creation
+    // As far as I can tell:
+    //  * file creation (touch calls lookup -> create -> mknod -> lookup)
     //  * file attributes changing
     //  * "directory" creation
     //  * moving files and tags

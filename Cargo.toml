@@ -13,3 +13,4 @@ env_logger = "0.8"
 log = "*"
 lazy_static = "*"
 sha3 = "0.9.1"
+uuid = { version = "0.8", features = ["v4"] }
