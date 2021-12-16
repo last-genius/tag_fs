@@ -15,3 +15,7 @@ cargo build
 ```
 sudo target/debug/tag_fs $MOUNT_POINT
 ```
+
+## Progress
+
+Currently implementing the file contents hashing and disk operations
