@@ -1,78 +1,31 @@
 use fuser::{
-    FileAttr, FileType, Filesystem, KernelConfig, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData,
+    FileType, Filesystem, KernelConfig, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData,
     ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek,
     ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow,
 };
-use libc::{c_int, getgid, getuid, ENOENT, ENOSYS};
+use libc::{c_int, ENOENT, ENOSYS};
 use log::debug;
 use sha3::{Digest, Sha3_256};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+use uuid::Uuid;
 
+use self::defs::{Hash256, InodeAttributes, HELLO_TXT_CONTENT, TTL};
 use self::nodes::{FileNode, NameNode, Node, TagNode};
 
+mod defs;
 mod nodes;
-
-const TTL: Duration = Duration::from_secs(1);
-
-const HELLO_TXT_CONTENT: &str = "Hello World!\n";
-
-trait NewFileAttr {
-    fn new_file_attr(ino: u64, kind: FileType, perm: u16) -> FileAttr;
-}
-
-impl NewFileAttr for FileAttr {
-    fn new_file_attr(ino: u64, kind: FileType, perm: u16) -> FileAttr {
-        FileAttr {
-            ino,
-            size: 0,
-            blocks: 0,
-            atime: UNIX_EPOCH,
-            mtime: UNIX_EPOCH,
-            ctime: UNIX_EPOCH,
-            crtime: UNIX_EPOCH,
-            kind,
-            perm,
-            nlink: 2,
-            uid: unsafe { getuid() },
-            gid: unsafe { getgid() },
-            rdev: 0,
-            flags: 0,
-            blksize: 512,
-        }
-    }
-}
-
-lazy_static::lazy_static! {
-    static ref FAKE_ROOT_DIR_ATTR: FileAttr = FileAttr::new_file_attr(1, FileType::Directory, 0x755);
-
-    static ref HELLO_TXT_ATTR: FileAttr = FileAttr {
-        ino: 2,
-        size: 13,
-        blocks: 1,
-        atime: UNIX_EPOCH, // 1970-01-01 00:00:00
-        mtime: UNIX_EPOCH,
-        ctime: UNIX_EPOCH,
-        crtime: UNIX_EPOCH,
-        kind: FileType::RegularFile,
-        perm: 0o644,
-        nlink: 1,
-        uid: unsafe { getuid() },
-        gid: unsafe { getgid() },
-        rdev: 0,
-        flags: 0,
-        blksize: 512,
-    };
-}
 
 pub struct TagFS {
     hasher: Sha3_256,
     name_nodes: BTreeMap<OsString, BTreeSet<Rc<RefCell<NameNode>>>>,
     file_nodes: BTreeSet<Node>,
+    data_dir: PathBuf,
 }
 
 impl TagFS {
@@ -81,20 +34,8 @@ impl TagFS {
             hasher: Sha3_256::new(),
             name_nodes: BTreeMap::new(),
             file_nodes: BTreeSet::new(),
+            data_dir: PathBuf::from("/tmp/tagfs"),
         };
-
-        // Create a fake root dir (sort of like 'all tags')
-        let fake_root = TagNode::new(1);
-        fs.file_nodes.insert(Node::Tag(fake_root.clone()));
-
-        // Create a simple test file too
-        let file_node: Rc<RefCell<FileNode>> = FileNode::new(&mut fs.hasher, 2);
-        fs.file_nodes.insert(Node::File(file_node.clone()));
-
-        let name_node = NameNode::new("file1".into(), Node::File(file_node));
-        fake_root.borrow_mut().add_file(name_node.clone());
-
-        fs.insert_name_node(name_node);
 
         fs
     }
@@ -106,6 +47,48 @@ impl TagFS {
             .entry(name)
             .or_insert(BTreeSet::new())
             .insert(name_node);
+    }
+
+    pub fn insert_inode(&mut self, node: Node) {
+        match node {
+            Node::Tag(x) => self.write_tag_node(&node, x.borrow().id),
+            Node::File(x) => self.write_file_node(&node, x.borrow().hash),
+        }
+        self.file_nodes.insert(node);
+    }
+
+    fn get_inode(&self, inode: u64) -> Result<InodeAttributes, c_int> {
+        let path = self.data_dir.join("inodes").join(inode.to_string());
+        if let Ok(file) = File::open(&path) {
+            Ok(bincode::deserialize_from(file).unwrap())
+        } else {
+            Err(libc::ENOENT)
+        }
+    }
+
+    fn write_file_node(&self, inode: &Node, hash: Hash256) {
+        let path = Path::new(&self.data_dir)
+            .join("inodes")
+            .join(hash.to_string());
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        bincode::serialize_into(file, inode).unwrap();
+    }
+    fn write_tag_node(&self, inode: &Node, id: Uuid) {
+        let path = Path::new(&self.data_dir)
+            .join("inodes")
+            .join(id.to_string());
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        bincode::serialize_into(file, inode).unwrap();
     }
 }
 
@@ -121,8 +104,8 @@ impl Filesystem for TagFS {
             let entry = self.name_nodes[os_name].first();
             if let Some(x) = entry {
                 match &RefCell::borrow(&x).link {
-                    Node::File(y) => reply.entry(&TTL, &RefCell::borrow(&y).file_attr, 0),
-                    Node::Tag(y) => reply.entry(&TTL, &RefCell::borrow(&y).dir_attr, 0),
+                    Node::File(y) => reply.entry(&TTL, &RefCell::borrow(&y).file_attr.into(), 0),
+                    Node::Tag(y) => reply.entry(&TTL, &RefCell::borrow(&y).dir_attr.into(), 0),
                 }
             }
         } else {
@@ -138,8 +121,8 @@ impl Filesystem for TagFS {
                 Node::File(x) => RefCell::borrow(&x).file_attr,
                 Node::Tag(x) => RefCell::borrow(&x).dir_attr,
             };
-            if file_attr.ino == ino {
-                reply.attr(&TTL, &file_attr);
+            if file_attr.inode == ino {
+                reply.attr(&TTL, &file_attr.into());
                 return;
             }
         }
@@ -179,7 +162,7 @@ impl Filesystem for TagFS {
             match node {
                 Node::File(x) => {
                     let file = RefCell::borrow(&x);
-                    if file.file_attr.ino == ino {
+                    if file.file_attr.inode == ino {
                         // TODO
                         for (i, entry) in file.back_links.iter().enumerate().skip(offset as usize) {
                             let e = entry.upgrade().unwrap();
@@ -194,7 +177,7 @@ impl Filesystem for TagFS {
                 }
                 Node::Tag(x) => {
                     let tag = RefCell::borrow(&x);
-                    if tag.dir_attr.ino == ino {
+                    if tag.dir_attr.inode == ino {
                         // TODO
                         for (i, entry) in tag.dir_links.iter().enumerate().skip(offset as usize) {
                             let x = RefCell::borrow(entry);
@@ -203,7 +186,7 @@ impl Filesystem for TagFS {
                             match &x.link {
                                 Node::Tag(y) => {
                                     if reply.add(
-                                        RefCell::borrow(&y).dir_attr.ino,
+                                        RefCell::borrow(&y).dir_attr.inode,
                                         (i + 1) as i64,
                                         FileType::Directory,
                                         &x.name,
@@ -213,7 +196,7 @@ impl Filesystem for TagFS {
                                 }
                                 Node::File(y) => {
                                     if reply.add(
-                                        RefCell::borrow(&y).file_attr.ino,
+                                        RefCell::borrow(&y).file_attr.inode,
                                         (i + 1) as i64,
                                         FileType::RegularFile,
                                         &x.name,
@@ -247,6 +230,19 @@ impl Filesystem for TagFS {
         // TODO: Initiate hashers, lists, etc.
         // TODO: In future, recover data from a disk image?
         debug!("init");
+
+        // Create a fake root dir (sort of like 'all tags')
+        let fake_root = TagNode::new(1);
+        self.file_nodes.insert(Node::Tag(fake_root.clone()));
+
+        // Create a simple test file too
+        let file_node: Rc<RefCell<FileNode>> = FileNode::new(&mut self.hasher, 2);
+        self.file_nodes.insert(Node::File(file_node.clone()));
+
+        let name_node = NameNode::new("file1".into(), Node::File(file_node));
+        fake_root.borrow_mut().add_file(name_node.clone());
+
+        self.insert_name_node(name_node);
         Ok(())
     }
 
