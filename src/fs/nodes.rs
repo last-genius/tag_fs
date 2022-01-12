@@ -1,10 +1,4 @@
-use std::{
-    cell::RefCell,
-    cmp::Ordering,
-    collections::BTreeSet,
-    ffi::OsString,
-    rc::{Rc, Weak},
-};
+use std::{cmp::Ordering, collections::BTreeSet, ffi::OsString};
 
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -21,7 +15,7 @@ pub struct FileNode {
     //hash per block
     pub hash: Hash256,
     pub file_attr: InodeAttributes,
-    pub back_links: Vec<Weak<RefCell<NameNode>>>,
+    pub back_links: Vec<NameNode>,
 }
 
 impl PartialEq for FileNode {
@@ -42,16 +36,14 @@ impl PartialOrd for FileNode {
 }
 
 impl FileNode {
-    pub fn new(hasher: &mut Sha3_256, ino: u64) -> Rc<RefCell<FileNode>> {
-        let f = Self {
+    pub fn new(hasher: &mut Sha3_256, ino: u64) -> Self {
+        Self {
             hash: Hash256 {
                 code: hasher.finalize_reset(),
             },
             file_attr: InodeAttributes::new_file_attr(ino, FileKind::File, 0o644),
             back_links: Vec::new(),
-        };
-
-        Rc::new(RefCell::new(f))
+        }
     }
 
     #[allow(dead_code)]
@@ -68,8 +60,8 @@ pub struct TagNode {
     // TODO: links to files
     pub id: Uuid,
     pub dir_attr: InodeAttributes,
-    pub back_links: Vec<Weak<RefCell<NameNode>>>,
-    pub dir_links: BTreeSet<Rc<RefCell<NameNode>>>,
+    pub back_links: Vec<Uuid>,
+    pub dir_links: BTreeSet<Uuid>,
 }
 
 impl PartialEq for TagNode {
@@ -90,29 +82,29 @@ impl PartialOrd for TagNode {
 }
 
 impl TagNode {
-    pub fn new(ino: u64) -> Rc<RefCell<TagNode>> {
-        let f = Self {
+    pub fn new(ino: u64) -> Self {
+        Self {
             id: Uuid::new_v4(),
             dir_attr: InodeAttributes::new_file_attr(ino, FileKind::Directory, 0o644),
             back_links: Vec::new(),
             dir_links: BTreeSet::new(),
-        };
-
-        Rc::new(RefCell::new(f))
+        }
     }
 
-    pub fn add_file(&mut self, name_node: Rc<RefCell<NameNode>>) {
+    pub fn add_file(&mut self, name_node: Uuid) {
         self.dir_links.insert(name_node);
     }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
 pub enum Node {
-    File(Rc<RefCell<FileNode>>),
-    Tag(Rc<RefCell<TagNode>>),
+    File(Hash256),
+    Tag(Uuid),
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NameNode {
+    pub id: Uuid,
     pub name: OsString,
     pub link: Node,
 }
@@ -135,17 +127,20 @@ impl PartialEq for NameNode {
 impl Eq for NameNode {}
 
 impl NameNode {
-    pub fn new(name: OsString, link: Node) -> Rc<RefCell<Self>> {
-        let name_node = Rc::new(RefCell::new(Self {
+    pub fn new(name: OsString, link: Node) -> Self {
+        let n = Self {
+            id: Uuid::new_v4(),
             name,
-            link: link.clone(),
-        }));
-        match link {
-            Node::File(x) => x.borrow_mut().back_links.push(Rc::downgrade(&name_node)),
-            Node::Tag(x) => x.borrow_mut().back_links.push(Rc::downgrade(&name_node)),
+            link,
         };
 
-        name_node
+        // TODO
+        //match link {
+        //Node::File(x) => x.borrow_mut().back_links.push(Rc::downgrade(&name_node)),
+        //Node::Tag(x) => x.borrow_mut().back_links.push(Rc::downgrade(&name_node)),
+        //};
+
+        n
     }
 }
 

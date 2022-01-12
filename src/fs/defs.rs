@@ -44,7 +44,7 @@ fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
 // Hash section
 type HashArray = GenericArray<u8, <Sha3_256 as FixedOutput>::OutputSize>;
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct Hash256 {
     code: HashArray,
 }
@@ -77,7 +77,7 @@ impl Serialize for Hash256 {
         state.end()
     }
 }
-use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 impl<'de> Deserialize<'de> for Hash256 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -87,62 +87,31 @@ impl<'de> Deserialize<'de> for Hash256 {
         #[derive(Deserialize)]
         #[serde(field_identifier, rename_all = "lowercase")]
         enum Field {
-            Secs,
-            Nanos,
+            Code,
         }
 
-        struct DurationVisitor;
+        struct Hash256Visitor;
 
-        impl<'de> Visitor<'de> for DurationVisitor {
-            type Value = Duration;
+        impl<'de> Visitor<'de> for Hash256Visitor {
+            type Value = Hash256;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("struct Hash256")
             }
 
-            fn visit_seq<V>(self, mut seq: V) -> Result<Duration, V::Error>
+            fn visit_seq<V>(self, mut seq: V) -> Result<Hash256, V::Error>
             where
                 V: SeqAccess<'de>,
             {
-                let secs = seq
+                let code = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                let nanos = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
-                Ok(Duration::new(secs, nanos))
-            }
-
-            fn visit_map<V>(self, mut map: V) -> Result<Duration, V::Error>
-            where
-                V: MapAccess<'de>,
-            {
-                let mut secs = None;
-                let mut nanos = None;
-                while let Some(key) = map.next_key()? {
-                    match key {
-                        Field::Secs => {
-                            if secs.is_some() {
-                                return Err(de::Error::duplicate_field("secs"));
-                            }
-                            secs = Some(map.next_value()?);
-                        }
-                        Field::Nanos => {
-                            if nanos.is_some() {
-                                return Err(de::Error::duplicate_field("nanos"));
-                            }
-                            nanos = Some(map.next_value()?);
-                        }
-                    }
-                }
-                let secs = secs.ok_or_else(|| de::Error::missing_field("secs"))?;
-                let nanos = nanos.ok_or_else(|| de::Error::missing_field("nanos"))?;
-                Ok(Duration::new(secs, nanos))
+                Ok(Hash256 { code })
             }
         }
 
-        const FIELDS: &'static [&'static str] = &["secs", "nanos"];
-        deserializer.deserialize_struct("Duration", FIELDS, DurationVisitor)
+        const FIELDS: &'static [&'static str] = &["code"];
+        deserializer.deserialize_struct("Hash256", FIELDS, Hash256Visitor)
     }
 }
 
