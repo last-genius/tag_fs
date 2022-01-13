@@ -2,14 +2,10 @@ use fuser::{FileAttr, FileType};
 use libc::{getgid, getuid};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-//use std::collections::BTreeMap;
 use std::{
     fmt::Display,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-// These two constants are just temporary, TODO
-pub const HELLO_TXT_CONTENT: &str = "Hello World!\n";
 
 const BLOCK_SIZE: u64 = 512;
 
@@ -40,7 +36,6 @@ fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
 // Hash section
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Deserialize, Serialize)]
 pub struct Hash256 {
-    //#[serde(deserialize_with = "deserialize_data")]
     #[serde(with = "from_string")]
     pub code: String,
 }
@@ -83,42 +78,6 @@ impl Display for Hash256 {
         write!(f, "{}", self.code)
     }
 }
-
-//impl<'de> Deserialize<'de> for Hash256 {
-//fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//where
-//D: Deserializer<'de>,
-//{
-//#[derive(Deserialize)]
-//#[serde(field_identifier, rename_all = "lowercase")]
-//enum Field {
-//Code,
-//}
-
-//struct Hash256Visitor;
-
-//impl<'de> Visitor<'de> for Hash256Visitor {
-//type Value = Hash256;
-
-//fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-//formatter.write_str("struct Hash256")
-//}
-
-//fn visit_seq<V>(self, mut seq: V) -> Result<Hash256, V::Error>
-//where
-//V: SeqAccess<'de>,
-//{
-//let code = seq
-//.next_element()?
-//.ok_or_else(|| de::Error::invalid_length(0, &self))?;
-//Ok(Hash256 { code })
-//}
-//}
-
-//const FIELDS: &'static [&'static str] = &["code"];
-//deserializer.deserialize_struct("Hash256", FIELDS, Hash256Visitor)
-//}
-//}
 
 #[derive(Serialize, Deserialize, Copy, Clone, PartialEq)]
 pub enum FileKind {
@@ -196,9 +155,11 @@ impl InodeAttributes {
     }
 }
 
-// TODO this is temporary as well
+// TODO this is temporary
+pub const TTL: Duration = Duration::from_secs(1);
+
 lazy_static::lazy_static! {
-    static ref FAKE_ROOT_DIR_ATTR: InodeAttributes = InodeAttributes::new_file_attr(1, FileKind::Directory, 0x755);
+    pub static ref FAKE_ROOT_DIR_ATTR: InodeAttributes = InodeAttributes::new_file_attr(1, FileKind::Directory, 0x755);
 
     static ref HELLO_TXT_ATTR: FileAttr = FileAttr {
         ino: 2,

@@ -8,11 +8,6 @@ use super::defs::{FileKind, Hash256, HashCalculate, InodeAttributes};
 
 #[derive(Serialize, Deserialize)]
 pub struct FileNode {
-    // TODO
-    //content:
-    //metadata schema
-    //block references
-    //hash per block
     pub hash: Hash256,
     pub file_attr: InodeAttributes,
     pub back_links: Vec<NameNode>,
@@ -89,9 +84,15 @@ impl TagNode {
         }
     }
 
-    pub fn add_file(&mut self, name_node: Uuid) {
-        self.dir_links.insert(name_node);
+    pub fn add_file(&mut self, name_node: &NameNode) {
+        self.dir_links.insert(name_node.id);
     }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum INode {
+    File(FileNode),
+    Tag(TagNode),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
