@@ -1,10 +1,7 @@
 use fuser::{FileAttr, FileType};
 use libc::{getgid, getuid};
-use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
-use sha3::{
-    digest::{generic_array::GenericArray, FixedOutput},
-    Digest, Sha3_256,
-};
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 //use std::collections::BTreeMap;
 use std::{
     fmt::Display,
@@ -12,7 +9,6 @@ use std::{
 };
 
 // These two constants are just temporary, TODO
-pub const TTL: Duration = Duration::from_secs(1);
 pub const HELLO_TXT_CONTENT: &str = "Hello World!\n";
 
 const BLOCK_SIZE: u64 = 512;
@@ -42,78 +38,87 @@ fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
 }
 
 // Hash section
-type HashArray = GenericArray<u8, <Sha3_256 as FixedOutput>::OutputSize>;
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Deserialize, Serialize)]
 pub struct Hash256 {
-    code: HashArray,
+    //#[serde(deserialize_with = "deserialize_data")]
+    #[serde(with = "from_string")]
+    pub code: String,
+}
+
+mod from_string {
+    use std::fmt::Display;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn deserialize<'de, D>(d: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(<&str>::deserialize(d)?.to_string())
+    }
+
+    pub fn serialize<S, T>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Display,
+    {
+        format!("{}", value).serialize(serializer)
+    }
 }
 
 pub trait HashCalculate {
-    fn calculate_hash(self: Self) -> Hash256;
+    fn calculate_hash(&mut self) -> Hash256;
 }
 
 impl HashCalculate for Sha3_256 {
-    fn calculate_hash(self: Self) -> Hash256 {
+    fn calculate_hash(&mut self) -> Hash256 {
         Hash256 {
-            code: self.finalize_reset(),
+            code: format!("{:x}", self.finalize_reset()),
         }
     }
 }
 
 impl Display for Hash256 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:x}", self.code)
+        write!(f, "{}", self.code)
     }
 }
-impl Serialize for Hash256 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // 3 is the number of fields in the struct.
-        let mut state = serializer.serialize_struct("Hash256", 1)?;
-        state.serialize_field("code", &format!("{:x}", &self.code))?;
-        state.end()
-    }
-}
-use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
-impl<'de> Deserialize<'de> for Hash256 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(field_identifier, rename_all = "lowercase")]
-        enum Field {
-            Code,
-        }
+//impl<'de> Deserialize<'de> for Hash256 {
+//fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+//where
+//D: Deserializer<'de>,
+//{
+//#[derive(Deserialize)]
+//#[serde(field_identifier, rename_all = "lowercase")]
+//enum Field {
+//Code,
+//}
 
-        struct Hash256Visitor;
+//struct Hash256Visitor;
 
-        impl<'de> Visitor<'de> for Hash256Visitor {
-            type Value = Hash256;
+//impl<'de> Visitor<'de> for Hash256Visitor {
+//type Value = Hash256;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("struct Hash256")
-            }
+//fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+//formatter.write_str("struct Hash256")
+//}
 
-            fn visit_seq<V>(self, mut seq: V) -> Result<Hash256, V::Error>
-            where
-                V: SeqAccess<'de>,
-            {
-                let code = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                Ok(Hash256 { code })
-            }
-        }
+//fn visit_seq<V>(self, mut seq: V) -> Result<Hash256, V::Error>
+//where
+//V: SeqAccess<'de>,
+//{
+//let code = seq
+//.next_element()?
+//.ok_or_else(|| de::Error::invalid_length(0, &self))?;
+//Ok(Hash256 { code })
+//}
+//}
 
-        const FIELDS: &'static [&'static str] = &["code"];
-        deserializer.deserialize_struct("Hash256", FIELDS, Hash256Visitor)
-    }
-}
+//const FIELDS: &'static [&'static str] = &["code"];
+//deserializer.deserialize_struct("Hash256", FIELDS, Hash256Visitor)
+//}
+//}
 
 #[derive(Serialize, Deserialize, Copy, Clone, PartialEq)]
 pub enum FileKind {

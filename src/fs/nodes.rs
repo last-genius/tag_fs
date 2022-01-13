@@ -38,9 +38,7 @@ impl PartialOrd for FileNode {
 impl FileNode {
     pub fn new(hasher: &mut Sha3_256, ino: u64) -> Self {
         Self {
-            hash: Hash256 {
-                code: hasher.finalize_reset(),
-            },
+            hash: hasher.calculate_hash(),
             file_attr: InodeAttributes::new_file_attr(ino, FileKind::File, 0o644),
             back_links: Vec::new(),
         }

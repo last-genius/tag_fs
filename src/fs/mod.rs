@@ -28,7 +28,7 @@ pub struct TagFS {
 
 impl TagFS {
     pub fn new() -> Self {
-        let mut fs = Self {
+        let fs = Self {
             hasher: Sha3_256::new(),
             name_nodes: BTreeMap::new(),
             file_nodes: BTreeSet::new(),
@@ -41,7 +41,7 @@ impl TagFS {
     // TODO: Figure out proper references. But for now we can just clone this shit
     pub fn insert_name_node(&mut self, name_node: &NameNode) {
         self.name_nodes
-            .entry(name_node.name)
+            .entry(name_node.name.clone())
             .or_insert(BTreeSet::new())
             .insert(name_node.id);
     }
@@ -49,7 +49,7 @@ impl TagFS {
     pub fn insert_inode(&mut self, node: Node) {
         match node {
             Node::Tag(id) => self.write_tag_node(&node, id),
-            Node::File(hash) => self.write_file_node(&node, hash),
+            Node::File(ref hash) => self.write_file_node(&node, hash),
         }
         self.file_nodes.insert(node);
     }
@@ -63,10 +63,10 @@ impl TagFS {
         }
     }
 
-    fn write_file_node(&self, inode: &Node, hash: Hash256) {
+    fn write_file_node(&self, inode: &Node, hash: &Hash256) {
         let path = Path::new(&self.data_dir)
             .join("inodes")
-            .join(hash.to_string());
+            .join(hash.code.clone());
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -75,6 +75,7 @@ impl TagFS {
             .unwrap();
         bincode::serialize_into(file, inode).unwrap();
     }
+
     fn write_tag_node(&self, inode: &Node, id: Uuid) {
         let path = Path::new(&self.data_dir)
             .join("inodes")
@@ -99,7 +100,7 @@ impl Filesystem for TagFS {
         let os_name = &name.to_os_string();
         if self.name_nodes.contains_key(os_name) {
             let entry = self.name_nodes[os_name].first();
-            if let Some(x) = entry {
+            if let Some(_x) = entry {
                 // TODO
                 //match &RefCell::borrow(&x).link {
                 //Node::File(y) => reply.entry(&TTL, &RefCell::borrow(&y).file_attr.into(), 0),
@@ -114,7 +115,7 @@ impl Filesystem for TagFS {
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         debug!("getattr | ino: {}", ino);
         // TODO: maintain a separate storage for quick inode search????
-        for file in &self.file_nodes {
+        for _file in &self.file_nodes {
             // TODO
             //let file_attr = match file {
             //Node::File(x) => RefCell::borrow(&x).file_attr,
@@ -147,19 +148,12 @@ impl Filesystem for TagFS {
         }
     }
 
-    fn readdir(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
+    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, reply: ReplyDirectory) {
         debug!("readdir | ino: {}; offset: {}", ino, offset);
 
         for node in &self.file_nodes {
             match node {
-                Node::File(x) => {
+                Node::File(_x) => {
                     // TODO: implement file lookup by hash
                     //let file = RefCell::borrow(&x);
                     //if file.file_attr.inode == ino {
@@ -175,7 +169,7 @@ impl Filesystem for TagFS {
                     //}
                     //}
                 }
-                Node::Tag(x) => {
+                Node::Tag(_x) => {
                     // TODO
                     //let tag = RefCell::borrow(&x);
                     //if tag.dir_attr.inode == ino {
@@ -233,12 +227,12 @@ impl Filesystem for TagFS {
         debug!("init");
 
         // Create a fake root dir (sort of like 'all tags')
-        let fake_root = TagNode::new(1);
+        let mut fake_root = TagNode::new(1);
         self.file_nodes.insert(Node::Tag(fake_root.id));
 
         // Create a simple test file too
         let file_node: FileNode = FileNode::new(&mut self.hasher, 2);
-        self.file_nodes.insert(Node::File(file_node.hash));
+        self.file_nodes.insert(Node::File(file_node.hash.clone()));
 
         let name_node = NameNode::new("file1".into(), Node::File(file_node.hash));
         fake_root.add_file(name_node.id);
