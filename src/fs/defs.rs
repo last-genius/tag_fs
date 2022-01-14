@@ -34,7 +34,7 @@ fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
 }
 
 // Hash section
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Deserialize, Serialize)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Deserialize, Serialize, Debug)]
 pub struct Hash256 {
     #[serde(with = "from_string")]
     pub code: String,
@@ -49,7 +49,7 @@ mod from_string {
     where
         D: Deserializer<'de>,
     {
-        Ok(<&str>::deserialize(d)?.to_string())
+        Ok(<String>::deserialize(d)?)
     }
 
     pub fn serialize<S, T>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
@@ -159,7 +159,6 @@ impl InodeAttributes {
 pub const TTL: Duration = Duration::from_secs(1);
 
 lazy_static::lazy_static! {
-    pub static ref FAKE_ROOT_DIR_ATTR: InodeAttributes = InodeAttributes::new_file_attr(1, FileKind::Directory, 0x755);
 
     static ref HELLO_TXT_ATTR: FileAttr = FileAttr {
         ino: 2,

@@ -26,11 +26,5 @@ fn main() {
         MountOption::AllowOther,
     ];
     let fs = fs::TagFS::new();
-    use std::fs::File;
-    use std::io::prelude::*;
-    let mut file = File::open("/mnt/tagfs/foo.txt").unwrap();
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).unwrap();
-    println!("File: {}", contents);
     fuser::mount2(fs, mountpoint, &options).unwrap();
 }

@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::BTreeSet, ffi::OsString};
+use std::{cmp::Ordering, collections::BTreeSet, ffi::OsString, fmt::Display};
 
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -48,6 +48,12 @@ impl FileNode {
     }
 }
 
+impl Display for FileNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FileNode: {}", self.hash)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TagNode {
     // TODO: links to files
@@ -89,6 +95,12 @@ impl TagNode {
     }
 }
 
+impl Display for TagNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TagNode: {}", self.id)
+    }
+}
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum INode {
     File(FileNode),
@@ -99,6 +111,15 @@ pub enum INode {
 pub enum Node {
     File(Hash256),
     Tag(Uuid),
+}
+
+impl Display for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Node::File(hash) => write!(f, "Node::File({:?})", hash.code),
+            Node::Tag(id) => write!(f, "Node::Tag({})", id),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -140,6 +161,12 @@ impl NameNode {
         //};
 
         n
+    }
+}
+
+impl Display for NameNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NameNode {:?} -> {}", self.name, self.link)
     }
 }
 

@@ -9,12 +9,13 @@ use sha3::{Digest, Sha3_256};
 use std::cmp::min;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::fs::{File, OpenOptions};
+use std::fs::{create_dir_all, remove_file, File, OpenOptions};
 use std::os::unix::fs::{self, FileExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use uuid::Uuid;
 
-use self::defs::{FileKind, InodeAttributes, TTL};
+use self::defs::TTL;
 use self::nodes::{FileNode, INode, NameNode, Node, TagNode};
 
 mod defs;
@@ -27,51 +28,53 @@ pub struct TagFS {
 
 impl TagFS {
     pub fn new() -> Self {
-        let fs = Self {
-            hasher: Sha3_256::new(),
-            data_dir: PathBuf::from("/tmp/tagfs"),
-        };
-
-        fs
-    }
-
-    pub fn insert_name_node(&mut self, name_node: &NameNode) {
-        let path = Path::new(&self.data_dir)
-            .join("namenodes")
-            .join(name_node.name.clone());
-
-        let mut b = BTreeSet::new();
-
-        if path.exists() {
-            let file = OpenOptions::new()
-                .read(true)
-                .create(true)
-                .truncate(true)
-                .open(&path)
-                .unwrap();
-            b = bincode::deserialize_from(file).unwrap();
+        let base_path = PathBuf::from("/tmp/tagfs");
+        for subdir in [
+            "inodes",
+            "namenodes",
+            "namenodes_id",
+            "filenodes",
+            "tagnodes",
+        ] {
+            create_dir_all(base_path.join(subdir)).unwrap();
         }
 
-        b.insert(name_node.id);
+        let mut fs = Self {
+            hasher: Sha3_256::new(),
+            data_dir: base_path,
+        };
+
+        // TODO temporary testing
+        debug!("starting serialization");
+
+        let mut fake_root = TagNode::new(1);
+        let file_node = FileNode::new(&mut fs.hasher, 2);
+        let name_node = NameNode::new("file1".into(), Node::File(file_node.hash.clone()));
+        fake_root.add_file(&name_node);
+
+        let path = Path::new(&fs.data_dir).join("filenodes").join("test_file");
         let file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&path)
             .unwrap();
-        bincode::serialize_into(file, &b).unwrap();
-    }
+        bincode::serialize_into(file, &file_node).unwrap();
 
-    pub fn insert_inode(&mut self, node: &INode) {
-        match node {
-            INode::Tag(f) => self.write_tag_node(f),
-            INode::File(t) => self.write_file_node(t),
-        }
+        debug!("finished serialization");
+
+        debug!("{file_node}");
+        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let deserialized_file: FileNode = bincode::deserialize_from(file).unwrap();
+
+        // Finish of temporary testing
+
+        fs
     }
 
     fn get_inode(&self, ino: u64) -> Result<INode, c_int> {
+        debug!("get_inode | {ino}");
         let path = self.data_dir.join("inodes").join(ino.to_string());
-        println!("{:?}", path);
         if let Ok(file) = File::open(&path) {
             Ok(INode::File(bincode::deserialize_from(file).unwrap()))
         } else {
@@ -79,7 +82,19 @@ impl TagFS {
         }
     }
 
+    fn get_name_node(&self, id: &Uuid) -> Result<NameNode, c_int> {
+        debug!("get_name_node | {id}");
+        let path = self.data_dir.join("namenodes_id").join(id.to_string());
+        if let Ok(file) = File::open(&path) {
+            Ok(bincode::deserialize_from(file).unwrap())
+        } else {
+            Err(libc::ENOENT)
+        }
+    }
+
     fn get_node(&self, link_node: &Node) -> Result<INode, c_int> {
+        debug!("get_node | {link_node}");
+
         match link_node {
             Node::File(hash) => {
                 let path = self.data_dir.join("filenodes").join(hash.code.to_string());
@@ -100,7 +115,16 @@ impl TagFS {
         }
     }
 
+    pub fn insert_inode(&mut self, node: &INode) {
+        match node {
+            INode::Tag(f) => self.write_tag_node(f),
+            INode::File(t) => self.write_file_node(t),
+        }
+    }
+
     fn write_file_node(&self, inode: &FileNode) {
+        debug!("write_file_node | {inode}");
+
         let path = Path::new(&self.data_dir)
             .join("filenodes")
             .join(inode.hash.code.clone());
@@ -116,10 +140,13 @@ impl TagFS {
             .join("inodes")
             .join(inode.file_attr.inode.to_string());
 
+        remove_file(&symlink_path).unwrap();
         fs::symlink(path, symlink_path).unwrap();
     }
 
     fn write_tag_node(&self, inode: &TagNode) {
+        debug!("write_tag_node | {inode}");
+
         let path = Path::new(&self.data_dir)
             .join("tagnodes")
             .join(inode.id.to_string());
@@ -135,7 +162,63 @@ impl TagFS {
             .join("inodes")
             .join(inode.dir_attr.inode.to_string());
 
+        remove_file(&symlink_path).unwrap();
         fs::symlink(path, symlink_path).unwrap();
+    }
+
+    pub fn insert_name_node(&mut self, name_node: &NameNode) {
+        debug!("insert_name_node | {name_node}");
+
+        // BTreeSet by name
+        let path = Path::new(&self.data_dir)
+            .join("namenodes")
+            .join(name_node.name.clone());
+
+        let mut b = BTreeSet::new();
+
+        if path.exists() {
+            let file = OpenOptions::new().read(true).open(&path).unwrap();
+            b = bincode::deserialize_from(file).unwrap();
+        }
+
+        b.insert(name_node.id);
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        bincode::serialize_into(file, &b).unwrap();
+
+        // By UUID
+        let path = Path::new(&self.data_dir)
+            .join("namenodes_id")
+            .join(name_node.id.to_string());
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        bincode::serialize_into(file, name_node).unwrap();
+    }
+
+    // Service functions
+
+    pub fn search_name(&self, tag_node: &TagNode, os_name: &OsStr) -> Option<INode> {
+        for id in &tag_node.dir_links {
+            if let Ok(name_node) = self.get_name_node(id) {
+                if &name_node.name == os_name {
+                    if let Ok(node) = self.get_node(&name_node.link) {
+                        return Some(node);
+                    } else {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -148,21 +231,28 @@ impl Filesystem for TagFS {
         );
         // TODO: I think the trick here could be to use the parent i-node to denote a temporary
         // file that has all the metadata we need (the content of the current tag requests)
-        let fake_root_dir_attr = InodeAttributes::new_file_attr(1, FileKind::Directory, 0x755);
-        reply.entry(&TTL, &fake_root_dir_attr.into(), 0);
-        //let os_name = &name.to_os_string();
-        //if self.name_nodes.contains_key(os_name) {
-        //let entry = self.name_nodes[os_name].first();
-        //if let Some(_x) = entry {
-        //// TODO
-        ////match &RefCell::borrow(&x).link {
-        ////Node::File(y) => reply.entry(&TTL, &RefCell::borrow(&y).file_attr.into(), 0),
-        ////Node::Tag(y) => reply.entry(&TTL, &RefCell::borrow(&y).dir_attr.into(), 0),
-        ////}
-        //}
-        //} else {
-        //reply.error(ENOENT);
-        //}
+        //let fake_root_dir_attr = InodeAttributes::new_file_attr(1, FileKind::Directory, 0x755);
+        let os_name = &name.to_os_string();
+
+        // Iterate through every name node we point to, check whether any names are the same
+        // TODO: Instead of just pointing to UUIDs possibly point to names too to speed this up?
+        if let Ok(x) = self.get_inode(parent) {
+            if let INode::Tag(t) = x {
+                if let Some(node) = self.search_name(&t, os_name) {
+                    match node {
+                        INode::File(f) => {
+                            reply.entry(&TTL, &f.file_attr.into(), 0);
+                        }
+                        INode::Tag(t) => {
+                            reply.entry(&TTL, &t.dir_attr.into(), 0);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        reply.error(ENOENT);
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
