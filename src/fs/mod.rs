@@ -3,7 +3,7 @@ use fuser::{
     ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek, ReplyOpen,
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow,
 };
-use libc::{c_int, ENOENT, ENOSYS};
+use libc::{c_int, EISDIR, ENOENT, ENOSYS};
 use log::debug;
 use sha3::{Digest, Sha3_256};
 use std::cmp::min;
@@ -39,51 +39,38 @@ impl TagFS {
             create_dir_all(base_path.join(subdir)).unwrap();
         }
 
-        let mut fs = Self {
+        let fs = Self {
             hasher: Sha3_256::new(),
             data_dir: base_path,
         };
-
-        // TODO temporary testing
-        debug!("starting serialization");
-
-        let mut fake_root = TagNode::new(1);
-        let file_node = FileNode::new(&mut fs.hasher, 2);
-        let name_node = NameNode::new("file1".into(), Node::File(file_node.hash.clone()));
-        fake_root.add_file(&name_node);
-
-        let path = Path::new(&fs.data_dir).join("filenodes").join("test_file");
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .unwrap();
-        bincode::serialize_into(file, &file_node).unwrap();
-
-        debug!("finished serialization");
-
-        debug!("{file_node}");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
-        let deserialized_file: FileNode = bincode::deserialize_from(file).unwrap();
-
-        // Finish of temporary testing
 
         fs
     }
 
     fn get_inode(&self, ino: u64) -> Result<INode, c_int> {
-        debug!("get_inode | {ino}");
-        let path = self.data_dir.join("inodes").join(ino.to_string());
-        if let Ok(file) = File::open(&path) {
-            Ok(INode::File(bincode::deserialize_from(file).unwrap()))
-        } else {
-            Err(libc::ENOENT)
+        debug!("\tget_inode | {ino}");
+
+        if let Ok(path) = self
+            .data_dir
+            .join("inodes")
+            .join(ino.to_string())
+            .read_link()
+        {
+            if let Ok(file) = File::open(&path) {
+                let parent = path.parent().unwrap();
+                if parent.ends_with("tagnodes") {
+                    return Ok(INode::Tag(bincode::deserialize_from(file).unwrap()));
+                } else if parent.ends_with("filenodes") {
+                    return Ok(INode::File(bincode::deserialize_from(file).unwrap()));
+                }
+            }
         }
+
+        Err(libc::ENOENT)
     }
 
     fn get_name_node(&self, id: &Uuid) -> Result<NameNode, c_int> {
-        debug!("get_name_node | {id}");
+        debug!("\tget_name_node | {id}");
         let path = self.data_dir.join("namenodes_id").join(id.to_string());
         if let Ok(file) = File::open(&path) {
             Ok(bincode::deserialize_from(file).unwrap())
@@ -93,7 +80,7 @@ impl TagFS {
     }
 
     fn get_node(&self, link_node: &Node) -> Result<INode, c_int> {
-        debug!("get_node | {link_node}");
+        debug!("\tget_node | {link_node}");
 
         match link_node {
             Node::File(hash) => {
@@ -123,7 +110,7 @@ impl TagFS {
     }
 
     fn write_file_node(&self, inode: &FileNode) {
-        debug!("write_file_node | {inode}");
+        debug!("\twrite_file_node | {inode}");
 
         let path = Path::new(&self.data_dir)
             .join("filenodes")
@@ -145,7 +132,7 @@ impl TagFS {
     }
 
     fn write_tag_node(&self, inode: &TagNode) {
-        debug!("write_tag_node | {inode}");
+        debug!("\twrite_tag_node | {inode}");
 
         let path = Path::new(&self.data_dir)
             .join("tagnodes")
@@ -167,7 +154,7 @@ impl TagFS {
     }
 
     pub fn insert_name_node(&mut self, name_node: &NameNode) {
-        debug!("insert_name_node | {name_node}");
+        debug!("\tinsert_name_node | {name_node}");
 
         // BTreeSet by name
         let path = Path::new(&self.data_dir)
@@ -279,6 +266,7 @@ impl Filesystem for TagFS {
         reply: ReplyData,
     ) {
         debug!("read | ino: {}; offset: {}", ino, offset);
+
         let mut path = PathBuf::from(&self.data_dir);
         if let Ok(node) = self.get_inode(ino) {
             match node {
@@ -286,9 +274,9 @@ impl Filesystem for TagFS {
                     path.push("filenodes");
                     path.push(f.hash.code.clone());
                 }
-                INode::Tag(t) => {
-                    path.push("tagnodes");
-                    path.push(t.id.to_string());
+                INode::Tag(_) => {
+                    reply.error(EISDIR);
+                    return;
                 }
             }
 
@@ -308,56 +296,52 @@ impl Filesystem for TagFS {
         }
     }
 
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, reply: ReplyDirectory) {
+    fn readdir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
         debug!("readdir | ino: {}; offset: {}", ino, offset);
 
-        //TODO: implement file lookup by hash
-        //for (i, entry) in file.back_links.iter().enumerate().skip(offset as usize) {
-        //let e = entry.upgrade().unwrap();
-        //let x = RefCell::borrow(&e);
-        //// i + 1 means the index of the next entry
-        //// i-node, offset, type, name
-        //if reply.add(ino, (i + 1) as i64, FileType::RegularFile, &x.name) {
-        //break;
-        //}
-        //}
+        if let Ok(INode::Tag(t)) = self.get_inode(ino) {
+            let entries = t.dir_links;
 
-        //Node::Tag(_x) => {
-        // TODO
-        //let tag = RefCell::borrow(&x);
-        //if tag.dir_attr.inode == ino {
-        //for (i, entry) in tag.dir_links.iter().enumerate().skip(offset as usize) {
-        //let x = RefCell::borrow(entry);
-        //// i + 1 means the index of the next entry
-        //// i-node, offset, type, name
-        //match &x.link {
-        //Node::Tag(y) => {
-        //if reply.add(
-        //RefCell::borrow(&y).dir_attr.inode,
-        //(i + 1) as i64,
-        //FileType::Directory,
-        //&x.name,
-        //) {
-        //break;
-        //}
-        //}
-        //Node::File(y) => {
-        //if reply.add(
-        //RefCell::borrow(&y).file_attr.inode,
-        //(i + 1) as i64,
-        //FileType::RegularFile,
-        //&x.name,
-        //) {
-        //break;
-        //}
-        //}
-        //}
-        //}
-        //}
-        //reply.ok();
-        //return;
-        //}
-        reply.error(ENOENT);
+            for (index, id) in entries.iter().skip(offset as usize).enumerate() {
+                if let Ok(name_node) = self.get_name_node(&id) {
+                    let (inode, file_type) = {
+                        if let Ok(node) = self.get_node(&name_node.link) {
+                            match node {
+                                INode::File(f) => (f.file_attr.inode, f.file_attr.kind),
+                                INode::Tag(t) => (t.dir_attr.inode, t.dir_attr.kind),
+                            }
+                        } else {
+                            continue;
+                        }
+                    };
+                    debug!("\t> {inode}, {file_type:?}, {:?}", name_node.name);
+
+                    // i + 1 means the index of the next entry
+                    // i-node, offset, type, name
+                    let buffer_full: bool = reply.add(
+                        inode,
+                        offset + index as i64 + 1,
+                        file_type.into(),
+                        name_node.name,
+                    );
+
+                    if buffer_full {
+                        break;
+                    }
+                }
+            }
+
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
+        }
     }
 
     // NOTE: All the calls below this point are unimplemented, and return their default return

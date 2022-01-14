@@ -79,7 +79,7 @@ impl Display for Hash256 {
     }
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Debug)]
 pub enum FileKind {
     File,
     Directory,
