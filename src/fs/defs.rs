@@ -4,17 +4,20 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::{
     fmt::Display,
+    fs::remove_file,
+    os::unix::fs::symlink,
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const BLOCK_SIZE: u64 = 512;
+pub const BLOCK_SIZE: u64 = 512;
 
 // Helper time functions section
-fn time_now() -> (i64, u32) {
+pub fn time_now() -> (i64, u32) {
     time_from_system_time(&SystemTime::now())
 }
 
-fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
+pub fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
     if secs >= 0 {
         UNIX_EPOCH + Duration::new(secs as u64, nsecs)
     } else {
@@ -22,7 +25,7 @@ fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
     }
 }
 
-fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
+pub fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
     // Convert to signed 64-bit time with epoch at 0
     match system_time.duration_since(UNIX_EPOCH) {
         Ok(duration) => (duration.as_secs() as i64, duration.subsec_nanos()),
@@ -31,6 +34,13 @@ fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
             before_epoch_error.duration().subsec_nanos(),
         ),
     }
+}
+
+pub fn rewrite_symlink(path: PathBuf, symlink_path: PathBuf) {
+    if symlink_path.exists() {
+        remove_file(&symlink_path).unwrap()
+    };
+    symlink(path, symlink_path).unwrap();
 }
 
 // Hash section

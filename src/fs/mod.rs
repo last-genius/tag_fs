@@ -9,13 +9,15 @@ use sha3::{Digest, Sha3_256};
 use std::cmp::min;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::fs::{create_dir_all, remove_file, File, OpenOptions};
-use std::os::unix::fs::{self, FileExt};
+use std::fs::{create_dir_all, File, OpenOptions};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
-use self::defs::TTL;
+use crate::fs::defs::{rewrite_symlink, InodeAttributes};
+
+use self::defs::{time_now, FileKind, TTL};
 use self::nodes::{FileNode, INode, NameNode, Node, TagNode};
 
 mod defs;
@@ -24,6 +26,8 @@ mod nodes;
 pub struct TagFS {
     hasher: Sha3_256,
     data_dir: PathBuf,
+    inode_cur: u64,
+    filehandle_cur: u64,
 }
 
 impl TagFS {
@@ -42,9 +46,44 @@ impl TagFS {
         let fs = Self {
             hasher: Sha3_256::new(),
             data_dir: base_path,
+            inode_cur: 1,
+            filehandle_cur: 1,
         };
 
         fs
+    }
+
+    fn get_inode_cur(inode_cur: &mut u64) -> u64 {
+        let a = *inode_cur;
+        *inode_cur += 1;
+        a
+    }
+
+    fn get_filehandle_cur(&mut self) -> u64 {
+        let a = self.filehandle_cur;
+        self.filehandle_cur += 1;
+        a
+    }
+
+    fn allocate_next_inode(
+        &mut self,
+        inode_kind: FileKind,
+        attr: Option<InodeAttributes>,
+    ) -> INode {
+        debug!("\tallocate_next_inode | {inode_kind:?}");
+
+        match inode_kind {
+            FileKind::File => INode::File(FileNode::new(
+                &mut self.hasher,
+                TagFS::get_inode_cur(&mut self.inode_cur),
+                attr,
+            )),
+            FileKind::Directory => INode::Tag(TagNode::new(
+                TagFS::get_inode_cur(&mut self.inode_cur),
+                attr,
+            )),
+            FileKind::Symlink => unimplemented!(),
+        }
     }
 
     fn get_inode(&self, ino: u64) -> Result<INode, c_int> {
@@ -67,6 +106,14 @@ impl TagFS {
         }
 
         Err(libc::ENOENT)
+    }
+
+    fn get_node_from_inode(&self, ino: u64) -> Result<Node, c_int> {
+        match self.get_inode(ino) {
+            Ok(INode::File(f)) => Ok(Node::File(f.hash)),
+            Ok(INode::Tag(t)) => Ok(Node::Tag(t.id)),
+            Err(_) => Err(libc::ENOENT),
+        }
     }
 
     fn get_name_node(&self, id: &Uuid) -> Result<NameNode, c_int> {
@@ -127,8 +174,7 @@ impl TagFS {
             .join("inodes")
             .join(inode.file_attr.inode.to_string());
 
-        remove_file(&symlink_path).unwrap();
-        fs::symlink(path, symlink_path).unwrap();
+        rewrite_symlink(path, symlink_path);
     }
 
     fn write_tag_node(&self, inode: &TagNode) {
@@ -149,8 +195,7 @@ impl TagFS {
             .join("inodes")
             .join(inode.dir_attr.inode.to_string());
 
-        remove_file(&symlink_path).unwrap();
-        fs::symlink(path, symlink_path).unwrap();
+        rewrite_symlink(path, symlink_path);
     }
 
     pub fn insert_name_node(&mut self, name_node: &NameNode) {
@@ -210,6 +255,30 @@ impl TagFS {
 }
 
 impl Filesystem for TagFS {
+    fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
+        // TODO: Initiate hashers, lists, etc.
+        // TODO: In future, recover data from a disk image?
+        debug!("init");
+
+        // Create a fake root dir (sort of like 'all tags')
+        let mut fake_root = TagNode::new(TagFS::get_inode_cur(&mut self.inode_cur), None);
+
+        // Create a simple test file too
+        let file_node = FileNode::new(
+            &mut self.hasher,
+            TagFS::get_inode_cur(&mut self.inode_cur),
+            None,
+        );
+        let name_node = NameNode::new("file1".into(), Node::File(file_node.hash.clone()));
+        fake_root.add_file(&name_node);
+
+        self.insert_inode(&INode::File(file_node));
+        self.insert_inode(&INode::Tag(fake_root));
+        self.insert_name_node(&name_node);
+
+        Ok(())
+    }
+
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         debug!(
             "lookup | parent: {}; name: {}",
@@ -266,6 +335,8 @@ impl Filesystem for TagFS {
         reply: ReplyData,
     ) {
         debug!("read | ino: {}; offset: {}", ino, offset);
+
+        // TODO: Still not proper block hashings
 
         let mut path = PathBuf::from(&self.data_dir);
         if let Ok(node) = self.get_inode(ino) {
@@ -344,43 +415,283 @@ impl Filesystem for TagFS {
         }
     }
 
+    fn create(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mut mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        debug!("create | parent: {parent}, name: {name:?}");
+        let mut parent_attrs = match self.get_inode(parent) {
+            Ok(attrs) => match attrs {
+                INode::File(f) => f.file_attr,
+                INode::Tag(t) => t.dir_attr,
+            },
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        };
+
+        // TODO: access checks
+        parent_attrs.last_modified = time_now();
+        parent_attrs.last_metadata_changed = time_now();
+
+        if req.uid() != 0 {
+            mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
+        }
+
+        let file_type = mode & libc::S_IFMT as u32;
+
+        let file_type = match file_type {
+            libc::S_IFREG => FileKind::File,
+            libc::S_IFDIR => FileKind::Directory,
+            _ => {
+                reply.error(libc::ENOSYS);
+                unimplemented!("mknod() implementation is incomplete. Only supports regular files and directories. Got {:o}", mode);
+            }
+        };
+
+        let attrs = InodeAttributes {
+            inode: 0,
+            open_file_handles: 1,
+            size: 0,
+            last_accessed: time_now(),
+            last_modified: time_now(),
+            last_metadata_changed: time_now(),
+            kind: file_type,
+            mode: mode as u16,
+            hardlinks: 1,
+            uid: req.uid(),
+            gid: req.gid(),
+        };
+        let mut inode = self.allocate_next_inode(file_type, Some(attrs));
+
+        let parent_node = self.get_node_from_inode(parent).unwrap();
+        if let INode::Tag(ref mut t) = inode {
+            t.add_file(&NameNode::new(".".into(), Node::Tag(t.id)));
+            t.add_file(&NameNode::new("..".into(), parent_node));
+        };
+
+        let mut parent_inode = self.get_inode(parent).unwrap();
+        if let INode::Tag(ref mut t) = parent_inode {
+            let name_node = NameNode::new(name.to_os_string(), inode.to_node());
+            t.add_file(&name_node);
+            self.insert_name_node(&name_node);
+            self.insert_inode(&parent_inode);
+        }
+
+        // TODO: make it so after every modification inodes rewrite themselves?
+        self.insert_inode(&inode);
+
+        // TODO: implement flags
+        match inode {
+            INode::File(f) => {
+                reply.created(
+                    &Duration::new(0, 0),
+                    &f.file_attr.into(),
+                    0,
+                    self.get_filehandle_cur(),
+                    0,
+                );
+            }
+            INode::Tag(t) => {
+                reply.created(
+                    &Duration::new(0, 0),
+                    &t.dir_attr.into(),
+                    0,
+                    self.get_filehandle_cur(),
+                    0,
+                );
+            }
+        }
+    }
+
+    // TODO: refactor since create and mknod are basically doing the same thing except for the
+    // filehandler?
+
+    fn mknod(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mut mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        debug!("mknod");
+        //reply.error(ENOSYS);
+
+        let file_type = mode & libc::S_IFMT as u32;
+
+        let file_type = match file_type {
+            libc::S_IFREG => FileKind::File,
+            libc::S_IFDIR => FileKind::Directory,
+            _ => {
+                reply.error(libc::ENOSYS);
+                unimplemented!("mknod() implementation is incomplete. Only supports regular files and directories. Got {:o}", mode);
+            }
+        };
+
+        // We can't return EEXIST sort of - we can create an arbitrary number of files with the
+        // same name, but different content and hash!
+
+        let mut parent_attrs = match self.get_inode(parent) {
+            Ok(attrs) => match attrs {
+                INode::File(f) => f.file_attr,
+                INode::Tag(t) => t.dir_attr,
+            },
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        };
+
+        // TODO: access checks
+        parent_attrs.last_modified = time_now();
+        parent_attrs.last_metadata_changed = time_now();
+
+        if req.uid() != 0 {
+            mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
+        }
+
+        let attrs = InodeAttributes {
+            inode: 0,
+            open_file_handles: 0,
+            size: 0,
+            last_accessed: time_now(),
+            last_modified: time_now(),
+            last_metadata_changed: time_now(),
+            kind: file_type,
+            mode: mode as u16,
+            hardlinks: 1,
+            uid: req.uid(),
+            gid: req.gid(), // TODO: Proper uid, gid creation
+        };
+        let mut inode = self.allocate_next_inode(file_type, Some(attrs));
+
+        let parent_node = self.get_node_from_inode(parent).unwrap();
+        if let INode::Tag(ref mut t) = inode {
+            t.add_file(&NameNode::new(".".into(), Node::Tag(t.id)));
+            t.add_file(&NameNode::new("..".into(), parent_node));
+        };
+
+        let mut parent_inode = self.get_inode(parent).unwrap();
+        if let INode::Tag(ref mut t) = parent_inode {
+            let name_node = NameNode::new(name.to_os_string(), inode.to_node());
+            t.add_file(&name_node);
+            self.insert_name_node(&name_node);
+            self.insert_inode(&parent_inode);
+        }
+
+        // TODO: make it so after every modification inodes rewrite themselves?
+        self.insert_inode(&inode);
+
+        // TODO: implement flags
+        match inode {
+            INode::File(f) => reply.entry(&Duration::new(0, 0), &f.file_attr.into(), 0),
+            INode::Tag(t) => reply.entry(&Duration::new(0, 0), &t.dir_attr.into(), 0),
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        _parent: u64,
+        _name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        debug!("mkdir | unimplemented!");
+        reply.error(ENOSYS);
+
+        //if self.lookup_name(parent, name).is_ok() {
+        //reply.error(libc::EEXIST);
+        //return;
+        //}
+
+        //let mut parent_attrs = match self.get_inode(parent) {
+        //Ok(attrs) => attrs,
+        //Err(error_code) => {
+        //reply.error(error_code);
+        //return;
+        //}
+        //};
+
+        //if !check_access(
+        //parent_attrs.uid,
+        //parent_attrs.gid,
+        //parent_attrs.mode,
+        //req.uid(),
+        //req.gid(),
+        //libc::W_OK,
+        //) {
+        //reply.error(libc::EACCES);
+        //return;
+        //}
+        //parent_attrs.last_modified = time_now();
+        //parent_attrs.last_metadata_changed = time_now();
+        //self.write_inode(&parent_attrs);
+
+        //if req.uid() != 0 {
+        //mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
+        //}
+        //if parent_attrs.mode & libc::S_ISGID as u16 != 0 {
+        //mode |= libc::S_ISGID as u32;
+        //}
+
+        //let inode = self.allocate_next_inode();
+        //let attrs = InodeAttributes {
+        //inode,
+        //open_file_handles: 0,
+        //size: BLOCK_SIZE,
+        //last_accessed: time_now(),
+        //last_modified: time_now(),
+        //last_metadata_changed: time_now(),
+        //kind: FileKind::Directory,
+        //mode: self.creation_mode(mode),
+        //hardlinks: 2, // Directories start with link count of 2, since they have a self link
+        //uid: req.uid(),
+        //gid: creation_gid(&parent_attrs, req.gid()),
+        //xattrs: Default::default(),
+        //};
+        //self.write_inode(&attrs);
+
+        //let mut entries = BTreeMap::new();
+        //entries.insert(b".".to_vec(), (inode, FileKind::Directory));
+        //entries.insert(b"..".to_vec(), (parent, FileKind::Directory));
+        //self.write_directory_content(inode, entries);
+
+        //let mut entries = self.get_directory_content(parent).unwrap();
+        //entries.insert(name.as_bytes().to_vec(), (inode, FileKind::Directory));
+        //self.write_directory_content(parent, entries);
+
+        //reply.entry(&TTL, &attrs.into(), 0);
+    }
+
     // NOTE: All the calls below this point are unimplemented, and return their default return
     // values, while also debug printing some information so we could use that while developing and
     // determining which functions need to be implemented for certain functionality to work
     //
     // TODO: Figure out what exactly is needed for simple functionality
     // As far as I can tell:
-    //  * file creation (touch calls lookup -> create -> mknod -> lookup)
+    //  * touch also calls setattr!
     //  * file attributes changing
     //  * "directory" creation
     //  * moving files and tags
 
-    fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
-        // TODO: Initiate hashers, lists, etc.
-        // TODO: In future, recover data from a disk image?
-        debug!("init");
-
-        // Create a fake root dir (sort of like 'all tags')
-        let mut fake_root = TagNode::new(1);
-
-        // Create a simple test file too
-        let file_node = FileNode::new(&mut self.hasher, 2);
-        let name_node = NameNode::new("file1".into(), Node::File(file_node.hash.clone()));
-        fake_root.add_file(&name_node);
-
-        self.insert_inode(&INode::File(file_node));
-        self.insert_inode(&INode::Tag(fake_root));
-        self.insert_name_node(&name_node);
-
-        Ok(())
-    }
-
     fn destroy(&mut self) {
-        debug!("destroy");
+        debug!("destroy | unimplemented!");
     }
 
     fn forget(&mut self, _req: &Request<'_>, _ino: u64, _nlookup: u64) {
-        debug!("forget");
+        debug!("forget | unimplemented!");
     }
 
     fn setattr(
@@ -401,49 +712,22 @@ impl Filesystem for TagFS {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        debug!("setattr");
+        debug!("setattr | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn readlink(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyData) {
-        debug!("readlink");
-        reply.error(ENOSYS);
-    }
-
-    fn mknod(
-        &mut self,
-        _req: &Request<'_>,
-        _parent: u64,
-        _name: &OsStr,
-        _mode: u32,
-        _umask: u32,
-        _rdev: u32,
-        reply: ReplyEntry,
-    ) {
-        debug!("mknod");
-        reply.error(ENOSYS);
-    }
-
-    fn mkdir(
-        &mut self,
-        _req: &Request<'_>,
-        _parent: u64,
-        _name: &OsStr,
-        _mode: u32,
-        _umask: u32,
-        reply: ReplyEntry,
-    ) {
-        debug!("mkdir");
+        debug!("readlink | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn unlink(&mut self, _req: &Request<'_>, _parent: u64, _name: &OsStr, reply: ReplyEmpty) {
-        debug!("unlink");
+        debug!("unlink | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, _parent: u64, _name: &OsStr, reply: ReplyEmpty) {
-        debug!("rmdir");
+        debug!("rmdir | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -455,7 +739,7 @@ impl Filesystem for TagFS {
         _link: &Path,
         reply: ReplyEntry,
     ) {
-        debug!("rmdir");
+        debug!("rmdir | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -469,7 +753,7 @@ impl Filesystem for TagFS {
         _flags: u32,
         reply: ReplyEmpty,
     ) {
-        debug!("rename");
+        debug!("rename | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -481,12 +765,12 @@ impl Filesystem for TagFS {
         _newname: &OsStr,
         reply: ReplyEntry,
     ) {
-        debug!("link");
+        debug!("link | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        debug!("open");
+        debug!("open | unimplemented!");
         reply.opened(0, 0);
     }
 
@@ -502,7 +786,7 @@ impl Filesystem for TagFS {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        debug!("write");
+        debug!("write | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -514,7 +798,7 @@ impl Filesystem for TagFS {
         _lock_owner: u64,
         reply: ReplyEmpty,
     ) {
-        debug!("flush");
+        debug!("flush | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -528,7 +812,7 @@ impl Filesystem for TagFS {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        debug!("release");
+        debug!("release | unimplemented!");
         reply.ok();
     }
 
@@ -540,12 +824,12 @@ impl Filesystem for TagFS {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        debug!("fsync");
+        debug!("fsync | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        debug!("opendir");
+        debug!("opendir | unimplemented!");
         reply.opened(0, 0);
     }
 
@@ -557,7 +841,7 @@ impl Filesystem for TagFS {
         _offset: i64,
         reply: ReplyDirectoryPlus,
     ) {
-        debug!("readdirplus");
+        debug!("readdirplus | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -569,7 +853,7 @@ impl Filesystem for TagFS {
         _flags: i32,
         reply: ReplyEmpty,
     ) {
-        debug!("releasedir");
+        debug!("releasedir | unimplemented!");
         reply.ok();
     }
 
@@ -581,12 +865,12 @@ impl Filesystem for TagFS {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        debug!("fsyncdir");
+        debug!("fsyncdir | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
-        debug!("statfs");
+        debug!("statfs | unimplemented!");
         reply.statfs(0, 0, 0, 0, 0, 512, 255, 0);
     }
 
@@ -600,7 +884,7 @@ impl Filesystem for TagFS {
         _position: u32,
         reply: ReplyEmpty,
     ) {
-        debug!("setxattr");
+        debug!("setxattr | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -612,36 +896,22 @@ impl Filesystem for TagFS {
         _size: u32,
         reply: ReplyXattr,
     ) {
-        debug!("getxattr");
+        debug!("getxattr | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn listxattr(&mut self, _req: &Request<'_>, _ino: u64, _size: u32, reply: ReplyXattr) {
-        debug!("listxattr");
+        debug!("listxattr | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn removexattr(&mut self, _req: &Request<'_>, _ino: u64, _name: &OsStr, reply: ReplyEmpty) {
-        debug!("removexattr");
+        debug!("removexattr | unimplemented!");
         reply.error(ENOSYS);
     }
 
     fn access(&mut self, _req: &Request<'_>, _ino: u64, _mask: i32, reply: ReplyEmpty) {
-        debug!("access");
-        reply.error(ENOSYS);
-    }
-
-    fn create(
-        &mut self,
-        _req: &Request<'_>,
-        _parent: u64,
-        _name: &OsStr,
-        _mode: u32,
-        _umask: u32,
-        _flags: i32,
-        reply: ReplyCreate,
-    ) {
-        debug!("create");
+        debug!("access | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -657,7 +927,7 @@ impl Filesystem for TagFS {
         _pid: u32,
         reply: ReplyLock,
     ) {
-        debug!("getlk");
+        debug!("getlk | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -674,7 +944,7 @@ impl Filesystem for TagFS {
         _sleep: bool,
         reply: ReplyEmpty,
     ) {
-        debug!("setlk");
+        debug!("setlk | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -686,7 +956,7 @@ impl Filesystem for TagFS {
         _idx: u64,
         reply: ReplyBmap,
     ) {
-        debug!("bmap");
+        debug!("bmap | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -701,7 +971,7 @@ impl Filesystem for TagFS {
         _out_size: u32,
         reply: ReplyIoctl,
     ) {
-        debug!("ioctl");
+        debug!("ioctl | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -715,7 +985,7 @@ impl Filesystem for TagFS {
         _mode: i32,
         reply: ReplyEmpty,
     ) {
-        debug!("fallocate");
+        debug!("fallocate | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -728,7 +998,7 @@ impl Filesystem for TagFS {
         _whence: i32,
         reply: ReplyLseek,
     ) {
-        debug!("lseek");
+        debug!("lseek | unimplemented!");
         reply.error(ENOSYS);
     }
 
@@ -745,7 +1015,7 @@ impl Filesystem for TagFS {
         _flags: u32,
         reply: ReplyWrite,
     ) {
-        debug!("copy_file_range");
+        debug!("copy_file_range | unimplemented!");
         reply.error(ENOSYS);
     }
 }

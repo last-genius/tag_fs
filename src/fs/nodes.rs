@@ -31,10 +31,16 @@ impl PartialOrd for FileNode {
 }
 
 impl FileNode {
-    pub fn new(hasher: &mut Sha3_256, ino: u64) -> Self {
+    pub fn new(hasher: &mut Sha3_256, ino: u64, attr: Option<InodeAttributes>) -> Self {
         Self {
             hash: hasher.calculate_hash(),
-            file_attr: InodeAttributes::new_file_attr(ino, FileKind::File, 0o644),
+            file_attr: match attr {
+                Some(mut x) => {
+                    x.inode = ino;
+                    x
+                }
+                None => InodeAttributes::new_file_attr(ino, FileKind::File, 0o644),
+            },
             back_links: Vec::new(),
         }
     }
@@ -81,10 +87,16 @@ impl PartialOrd for TagNode {
 }
 
 impl TagNode {
-    pub fn new(ino: u64) -> Self {
+    pub fn new(ino: u64, attr: Option<InodeAttributes>) -> Self {
         Self {
             id: Uuid::new_v4(),
-            dir_attr: InodeAttributes::new_file_attr(ino, FileKind::Directory, 0o644),
+            dir_attr: match attr {
+                Some(mut x) => {
+                    x.inode = ino;
+                    x
+                }
+                None => InodeAttributes::new_file_attr(ino, FileKind::Directory, 0o644),
+            },
             back_links: Vec::new(),
             dir_links: BTreeSet::new(),
         }
@@ -111,6 +123,15 @@ pub enum INode {
 pub enum Node {
     File(Hash256),
     Tag(Uuid),
+}
+
+impl INode {
+    pub fn to_node(&self) -> Node {
+        match self {
+            INode::File(f) => Node::File(f.hash.clone()),
+            INode::Tag(t) => Node::Tag(t.id),
+        }
+    }
 }
 
 impl Display for Node {
