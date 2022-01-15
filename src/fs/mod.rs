@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
-use crate::fs::defs::{rewrite_symlink, InodeAttributes};
+use crate::fs::defs::{rewrite_symlink, InodeAttributes, BLOCK_SIZE};
 
 use self::defs::{time_now, FileKind, TTL};
 use self::nodes::{FileNode, INode, NameNode, Node, TagNode};
@@ -525,7 +525,6 @@ impl Filesystem for TagFS {
         reply: ReplyEntry,
     ) {
         debug!("mknod");
-        //reply.error(ENOSYS);
 
         let file_type = mode & libc::S_IFMT as u32;
 
@@ -601,78 +600,74 @@ impl Filesystem for TagFS {
 
     fn mkdir(
         &mut self,
-        _req: &Request<'_>,
-        _parent: u64,
-        _name: &OsStr,
-        _mode: u32,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mut mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
         debug!("mkdir | unimplemented!");
-        reply.error(ENOSYS);
 
-        //if self.lookup_name(parent, name).is_ok() {
-        //reply.error(libc::EEXIST);
-        //return;
-        //}
+        let mut parent_attrs = match self.get_inode(parent) {
+            Ok(attrs) => match attrs {
+                INode::File(f) => f.file_attr,
+                INode::Tag(t) => t.dir_attr,
+            },
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        };
 
-        //let mut parent_attrs = match self.get_inode(parent) {
-        //Ok(attrs) => attrs,
-        //Err(error_code) => {
-        //reply.error(error_code);
-        //return;
-        //}
-        //};
+        // TODO check access
+        parent_attrs.last_modified = time_now();
+        parent_attrs.last_metadata_changed = time_now();
 
-        //if !check_access(
-        //parent_attrs.uid,
-        //parent_attrs.gid,
-        //parent_attrs.mode,
-        //req.uid(),
-        //req.gid(),
-        //libc::W_OK,
-        //) {
-        //reply.error(libc::EACCES);
-        //return;
-        //}
-        //parent_attrs.last_modified = time_now();
-        //parent_attrs.last_metadata_changed = time_now();
-        //self.write_inode(&parent_attrs);
+        if req.uid() != 0 {
+            mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
+        }
+        if parent_attrs.mode & libc::S_ISGID as u16 != 0 {
+            mode |= libc::S_ISGID as u32;
+        }
 
-        //if req.uid() != 0 {
-        //mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
-        //}
-        //if parent_attrs.mode & libc::S_ISGID as u16 != 0 {
-        //mode |= libc::S_ISGID as u32;
-        //}
+        let attrs = InodeAttributes {
+            inode: 0,
+            open_file_handles: 0,
+            size: BLOCK_SIZE,
+            last_accessed: time_now(),
+            last_modified: time_now(),
+            last_metadata_changed: time_now(),
+            kind: FileKind::Directory,
+            mode: mode as u16,
+            hardlinks: 2,
+            uid: req.uid(),
+            gid: req.gid(),
+        };
+        let mut inode = self.allocate_next_inode(FileKind::Directory, Some(attrs));
 
-        //let inode = self.allocate_next_inode();
-        //let attrs = InodeAttributes {
-        //inode,
-        //open_file_handles: 0,
-        //size: BLOCK_SIZE,
-        //last_accessed: time_now(),
-        //last_modified: time_now(),
-        //last_metadata_changed: time_now(),
-        //kind: FileKind::Directory,
-        //mode: self.creation_mode(mode),
-        //hardlinks: 2, // Directories start with link count of 2, since they have a self link
-        //uid: req.uid(),
-        //gid: creation_gid(&parent_attrs, req.gid()),
-        //xattrs: Default::default(),
-        //};
-        //self.write_inode(&attrs);
+        let parent_node = self.get_node_from_inode(parent).unwrap();
+        if let INode::Tag(ref mut t) = inode {
+            t.add_file(&NameNode::new(".".into(), Node::Tag(t.id)));
+            t.add_file(&NameNode::new("..".into(), parent_node));
+        };
 
-        //let mut entries = BTreeMap::new();
-        //entries.insert(b".".to_vec(), (inode, FileKind::Directory));
-        //entries.insert(b"..".to_vec(), (parent, FileKind::Directory));
-        //self.write_directory_content(inode, entries);
+        let mut parent_inode = self.get_inode(parent).unwrap();
+        if let INode::Tag(ref mut t) = parent_inode {
+            let name_node = NameNode::new(name.to_os_string(), inode.to_node());
+            t.add_file(&name_node);
+            self.insert_name_node(&name_node);
+            self.insert_inode(&parent_inode);
+        }
 
-        //let mut entries = self.get_directory_content(parent).unwrap();
-        //entries.insert(name.as_bytes().to_vec(), (inode, FileKind::Directory));
-        //self.write_directory_content(parent, entries);
+        // TODO: make it so after every modification inodes rewrite themselves?
+        self.insert_inode(&inode);
 
-        //reply.entry(&TTL, &attrs.into(), 0);
+        // TODO: implement flags
+        match inode {
+            INode::File(_) => reply.error(ENOSYS),
+            INode::Tag(t) => reply.entry(&TTL, &t.dir_attr.into(), 0),
+        }
     }
 
     // NOTE: All the calls below this point are unimplemented, and return their default return
