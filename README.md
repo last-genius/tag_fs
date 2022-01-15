@@ -1,4 +1,4 @@
-# tag_fs - A simple tag fileystem
+# tag_fs - A simple tag filesystem
 
 A quick-and-dirty proof of concept tag filesystem designed as a primary filesystem
 for an [OS project](https://github.com/last-genius/os_project/).
